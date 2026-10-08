@@ -1,7 +1,8 @@
 /**
- * Interfaz de usuario principal para SORTEO JUSTO (Fase 4)
- * Consume únicamente las funciones y el estado exportados por src/logica.ts.
- * Gestiona eventos del DOM, persistencia en localStorage y renderizado eficiente.
+ * Interfaz de usuario principal para SORTEO JUSTO (Fase 5: Optimización móvil Android)
+ * Consume únicamente las funciones de src/logica.ts.
+ * Implementa actualizaciones parciales del DOM para evitar cierres del teclado virtual
+ * en celulares, minimizar el consumo de memoria RAM y evitar bloqueos de la interfaz.
  */
 
 import './estilo.css';
@@ -22,17 +23,24 @@ import {
   cargarDatosGuardados,
   type EstadoSorteo,
   type ResultadoSorteo,
+  type TipoMensaje,
 } from './logica';
 
 const CLAVE_STORAGE = 'sorteo_justo_datos_v1';
+const LIMITE_HISTORIAL_COMPACTO = 8;
 
-/** Identificador del estudiante que se encuentra actualmente en modo edición en línea */
+/** Identificador del estudiante que está siendo editado en línea */
 let idEstudianteEditando: string | null = null;
 
-/** Indica si se muestra el panel de confirmación para reiniciar todos los datos */
+/** Indica si se muestra el cuadro de confirmación para reiniciar todos los datos */
 let mostrandoConfirmacionReinicio = false;
 
-/** Lista de ejemplo para facilitar pruebas rápidas en el aula */
+/** Indica si en móviles se despliega el historial completo cuando supera LIMITE_HISTORIAL_COMPACTO */
+let mostrarHistorialCompleto = false;
+
+/** Evita ejecuciones simultáneas mientras se procesa un sorteo */
+let sorteoEnCurso = false;
+
 const ESTUDIANTES_EJEMPLO = [
   'Ana María Rojas',
   'Carlos Andrés Pérez',
@@ -44,8 +52,35 @@ const ESTUDIANTES_EJEMPLO = [
   'Diego Alejandro Ruiz',
 ];
 
+/** Referencias en caché a nodos del DOM para actualizaciones parciales ultrarrápidas */
+interface ReferenciasDom {
+  resumenIndicadores: HTMLElement;
+  btnReiniciarTodo: HTMLButtonElement;
+  panelConfirmacion: HTMLElement;
+  bannerMensaje: HTMLElement;
+  iconoBanner: HTMLElement;
+  textoBanner: HTMLElement;
+  metaTotalEstudiantes: HTMLElement;
+  inputNombreEstudiante: HTMLInputElement;
+  contenedorListaEstudiantes: HTMLElement;
+  btnDecrementarEquipos: HTMLButtonElement;
+  valorEquipos: HTMLElement;
+  btnIncrementarEquipos: HTMLButtonElement;
+  notaEquilibrio: HTMLElement;
+  inputSemilla: HTMLInputElement;
+  btnEjecutarSorteo: HTMLButtonElement;
+  contenedorBtnNuevoSorteo: HTMLElement;
+  seccionResultados: HTMLElement;
+  metaResultados: HTMLElement;
+  contenedorResultados: HTMLElement;
+  contenedorAccionHistorial: HTMLElement;
+  contenedorHistorial: HTMLElement;
+}
+
+let refs: ReferenciasDom | null = null;
+
 /**
- * Escapa caracteres especiales para prevenir inyección HTML al mostrar nombres.
+ * Escapa caracteres HTML especiales en una sola pasada.
  */
 function escaparHtml(texto: string): string {
   return texto
@@ -57,7 +92,7 @@ function escaparHtml(texto: string): string {
 }
 
 /**
- * Formatea una fecha ISO en formato legible en español.
+ * Formatea una fecha ISO a hora local legible.
  */
 function formatearFechaCorta(fechaIso: string): string {
   try {
@@ -73,14 +108,14 @@ function formatearFechaCorta(fechaIso: string): string {
 }
 
 /**
- * Guarda el estado actual en localStorage de manera segura.
+ * Guarda el estado actual en localStorage sin bloquear el hilo principal.
  */
 function guardarEnAlmacenamientoLocal(): void {
   try {
     const datos = exportarDatosParaGuardar();
     window.localStorage.setItem(CLAVE_STORAGE, JSON.stringify(datos));
   } catch {
-    // En modo privado restringido o memoria llena, la aplicación continúa en memoria sin bloquearse
+    // Continúa en memoria si el navegador restringe el almacenamiento
   }
 }
 
@@ -96,12 +131,28 @@ function restaurarDeAlmacenamientoLocal(): void {
     const parseado: unknown = JSON.parse(crudo);
     cargarDatosGuardados(parseado);
   } catch {
-    // Si el almacenamiento local está corrupto, se conserva el estado limpio inicial
+    // Si hay datos corruptos, se mantiene el estado base limpio
   }
 }
 
 /**
- * Calcula una descripción clara de cómo quedarán repartidos los equipos antes de sortear.
+ * Devuelve el icono SVG ligero correspondiente al tipo de mensaje.
+ */
+function obtenerIconoBanner(tipo: TipoMensaje): string {
+  switch (tipo) {
+    case 'exito':
+      return `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>`;
+    case 'error':
+      return `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>`;
+    case 'advertencia':
+      return `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg>`;
+    default:
+      return `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>`;
+  }
+}
+
+/**
+ * Describe la distribución exacta de integrantes antes de ejecutar el sorteo.
  */
 function describirEquilibrioPrevio(totalEstudiantes: number, cantidadEquipos: number): string {
   if (totalEstudiantes < CONFIG.MIN_ESTUDIANTES) {
@@ -128,18 +179,460 @@ function describirEquilibrioPrevio(totalEstudiantes: number, cantidadEquipos: nu
 }
 
 /**
- * Genera el bloque HTML para mostrar el sorteo activo o el estado vacío.
+ * Monta una sola vez el esqueleto HTML estático y guarda las referencias de los contenedores dinámicos.
+ * Así el campo de texto y el teclado virtual en móviles Android nunca se destruyen ni parpadean al agregar estudiantes.
  */
-function renderizarZonaResultados(estado: EstadoSorteo): string {
-  const sorteo: ResultadoSorteo | null = estado.sorteoActual;
+function montarEstructuraBase(): void {
+  const contenedor = document.querySelector<HTMLDivElement>('#app');
+  if (!contenedor) {
+    return;
+  }
 
-  if (!sorteo) {
-    return `
+  contenedor.innerHTML = `
+    <div class="contenedor-app">
+      <!-- Encabezado principal -->
+      <header class="encabezado">
+        <div class="encabezado-identidad">
+          <div class="marca-icono" aria-hidden="true">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+              <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/>
+              <circle cx="9" cy="7" r="4"/>
+              <path d="M23 21v-2a4 4 0 00-3-3.87"/>
+              <path d="M16 3.13a4 4 0 010 7.75"/>
+            </svg>
+          </div>
+          <div>
+            <h1 class="titulo-app">SORTEO JUSTO</h1>
+            <p class="subtitulo-app">Equipos equilibrados al azar sin repetir compañeros</p>
+          </div>
+        </div>
+
+        <div class="barra-metricas">
+          <div id="dom-resumen-indicadores" class="resumen-indicadores" aria-label="Indicadores del grupo"></div>
+
+          <div class="acciones-encabezado">
+            <button type="button" class="btn btn-secundario" data-accion="cargar-ejemplo">
+              Cargar grupo de prueba
+            </button>
+            <button
+              id="dom-btn-reiniciar"
+              type="button"
+              class="btn btn-peligro"
+              data-accion="solicitar-reinicio"
+            >
+              Reiniciar todo
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <!-- Confirmación segura de reinicio integrada -->
+      <section
+        id="dom-panel-confirmacion"
+        class="panel-confirmacion oculto"
+        role="alertdialog"
+        aria-labelledby="titulo-confirmar-reinicio"
+      >
+        <p id="titulo-confirmar-reinicio" class="panel-confirmacion-texto">
+          <strong>¿Deseas reiniciar todos los datos?</strong> Se borrarán la lista de estudiantes y el historial guardado en este dispositivo.
+        </p>
+        <div class="panel-confirmacion-botones">
+          <button type="button" class="btn btn-peligro" data-accion="confirmar-reinicio">
+            Sí, borrar todo y reiniciar
+          </button>
+          <button type="button" class="btn btn-secundario" data-accion="cancelar-reinicio">
+            Cancelar
+          </button>
+        </div>
+      </section>
+
+      <!-- Banner de mensajes de éxito / advertencia / error -->
+      <div id="dom-banner-mensaje" class="banner-mensaje info" role="status" aria-live="polite">
+        <span id="dom-icono-banner" class="banner-icono"></span>
+        <span id="dom-texto-banner"></span>
+      </div>
+
+      <!-- Rejilla principal (1 columna en celular, 2 en escritorio) -->
+      <main class="rejilla-principal">
+        <!-- Panel 1 y 2: Estudiantes y Configuración -->
+        <section class="tarjeta-seccion" aria-labelledby="titulo-panel-estudiantes">
+          <div class="encabezado-seccion">
+            <h2 id="titulo-panel-estudiantes" class="titulo-seccion">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <path d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2"/>
+                <circle cx="9" cy="7" r="4"/>
+                <line x1="19" y1="8" x2="19" y2="14"/>
+                <line x1="22" y1="11" x2="16" y2="11"/>
+              </svg>
+              <span>1. Estudiantes</span>
+            </h2>
+            <span id="dom-meta-estudiantes" class="meta-seccion">0 registrados</span>
+          </div>
+
+          <form id="form-registro-estudiante" class="formulario-registro" novalidate>
+            <label for="input-nombre-estudiante" class="etiqueta-campo">Nombre del estudiante</label>
+            <div class="fila-entrada">
+              <input
+                id="input-nombre-estudiante"
+                name="nombre"
+                type="text"
+                class="campo-texto"
+                placeholder="Ej. Lucía Fernández"
+                maxlength="${CONFIG.MAX_LONGITUD_NOMBRE}"
+                autocomplete="off"
+                autocapitalize="words"
+                enterkeyhint="done"
+              />
+              <button type="submit" class="btn btn-turquesa">
+                Agregar estudiante
+              </button>
+            </div>
+          </form>
+
+          <div id="dom-contenedor-lista-estudiantes"></div>
+
+          <!-- Configuración de equipos y semilla -->
+          <div class="bloque-configuracion">
+            <div>
+              <label class="etiqueta-campo">2. Cantidad de equipos</label>
+              <div class="control-equipos" style="margin-top: 0.5rem;">
+                <button
+                  id="dom-btn-decrementar-equipos"
+                  type="button"
+                  class="btn btn-secundario"
+                  data-accion="decrementar-equipos"
+                  aria-label="Disminuir cantidad de equipos"
+                >
+                  −
+                </button>
+                <span id="dom-valor-equipos" class="valor-equipos" aria-live="polite">2</span>
+                <button
+                  id="dom-btn-incrementar-equipos"
+                  type="button"
+                  class="btn btn-secundario"
+                  data-accion="incrementar-equipos"
+                  aria-label="Aumentar cantidad de equipos"
+                >
+                  +
+                </button>
+              </div>
+              <p id="dom-nota-equilibrio" class="nota-equilibrio" style="margin-top: 0.5rem;"></p>
+            </div>
+
+            <div class="fila-semilla">
+              <label for="input-semilla" class="etiqueta-campo">
+                Semilla numérica (reproducibilidad)
+              </label>
+              <div class="controles-semilla">
+                <input
+                  id="input-semilla"
+                  type="number"
+                  inputmode="numeric"
+                  min="1"
+                  step="1"
+                  class="campo-numero"
+                  value="${CONFIG.SEMILLA_POR_DEFECTO}"
+                />
+                <button
+                  type="button"
+                  class="btn btn-secundario"
+                  data-accion="aplicar-semilla"
+                >
+                  Fijar
+                </button>
+              </div>
+            </div>
+
+            <div class="acciones-sorteo">
+              <button
+                id="dom-btn-ejecutar-sorteo"
+                type="button"
+                class="btn btn-verde btn-bloque"
+                data-accion="ejecutar-sorteo"
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+                  <polyline points="16 3 21 3 21 8"/>
+                  <line x1="4" y1="20" x2="21" y2="3"/>
+                  <polyline points="21 16 21 21 16 21"/>
+                  <line x1="15" y1="15" x2="21" y2="21"/>
+                  <line x1="4" y1="4" x2="9" y2="9"/>
+                </svg>
+                <span>Sortear Equipos Ahora</span>
+              </button>
+
+              <div id="dom-contenedor-btn-nuevo-sorteo"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Columna derecha: Resultados en tarjetas e Historial -->
+        <div class="columna-derecha">
+          <section id="dom-seccion-resultados" class="tarjeta-seccion" aria-labelledby="titulo-panel-resultados">
+            <div class="encabezado-seccion">
+              <h2 id="titulo-panel-resultados" class="titulo-seccion">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <rect x="3" y="3" width="7" height="7" rx="1"/>
+                  <rect x="14" y="3" width="7" height="7" rx="1"/>
+                  <rect x="14" y="14" width="7" height="7" rx="1"/>
+                  <rect x="3" y="14" width="7" height="7" rx="1"/>
+                </svg>
+                <span>3. Equipos Conformados</span>
+              </h2>
+              <span id="dom-meta-resultados" class="meta-seccion">Sin sorteo activo</span>
+            </div>
+
+            <div id="dom-contenedor-resultados"></div>
+          </section>
+
+          <section class="tarjeta-seccion" aria-labelledby="titulo-panel-historial">
+            <div class="encabezado-seccion">
+              <h2 id="titulo-panel-historial" class="titulo-seccion">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <circle cx="12" cy="12" r="10"/>
+                  <polyline points="12 6 12 12 16 14"/>
+                </svg>
+                <span>4. Historial de Sorteos</span>
+              </h2>
+              <div id="dom-contenedor-accion-historial"></div>
+            </div>
+
+            <div id="dom-contenedor-historial"></div>
+          </section>
+        </div>
+      </main>
+    </div>
+  `;
+
+  refs = {
+    resumenIndicadores: document.getElementById('dom-resumen-indicadores')!,
+    btnReiniciarTodo: document.getElementById('dom-btn-reiniciar') as HTMLButtonElement,
+    panelConfirmacion: document.getElementById('dom-panel-confirmacion')!,
+    bannerMensaje: document.getElementById('dom-banner-mensaje')!,
+    iconoBanner: document.getElementById('dom-icono-banner')!,
+    textoBanner: document.getElementById('dom-texto-banner')!,
+    metaTotalEstudiantes: document.getElementById('dom-meta-estudiantes')!,
+    inputNombreEstudiante: document.getElementById('input-nombre-estudiante') as HTMLInputElement,
+    contenedorListaEstudiantes: document.getElementById('dom-contenedor-lista-estudiantes')!,
+    btnDecrementarEquipos: document.getElementById(
+      'dom-btn-decrementar-equipos'
+    ) as HTMLButtonElement,
+    valorEquipos: document.getElementById('dom-valor-equipos')!,
+    btnIncrementarEquipos: document.getElementById(
+      'dom-btn-incrementar-equipos'
+    ) as HTMLButtonElement,
+    notaEquilibrio: document.getElementById('dom-nota-equilibrio')!,
+    inputSemilla: document.getElementById('input-semilla') as HTMLInputElement,
+    btnEjecutarSorteo: document.getElementById('dom-btn-ejecutar-sorteo') as HTMLButtonElement,
+    contenedorBtnNuevoSorteo: document.getElementById('dom-contenedor-btn-nuevo-sorteo')!,
+    seccionResultados: document.getElementById('dom-seccion-resultados')!,
+    metaResultados: document.getElementById('dom-meta-resultados')!,
+    contenedorResultados: document.getElementById('dom-contenedor-resultados')!,
+    contenedorAccionHistorial: document.getElementById('dom-contenedor-accion-historial')!,
+    contenedorHistorial: document.getElementById('dom-contenedor-historial')!,
+  };
+}
+
+/**
+ * Actualiza únicamente el encabezado de métricas, el panel de confirmación y el banner de mensajes.
+ */
+function actualizarIndicadoresYBanner(estado: EstadoSorteo): void {
+  if (!refs) {
+    return;
+  }
+
+  const totalEstudiantes = estado.estudiantes.length;
+
+  refs.resumenIndicadores.innerHTML = `
+    <span class="indicador-dato">Estudiantes: <strong>${totalEstudiantes}</strong></span>
+    <span class="separador-punto" aria-hidden="true">·</span>
+    <span class="indicador-dato">Equipos: <strong>${estado.cantidadEquipos}</strong></span>
+    <span class="separador-punto" aria-hidden="true">·</span>
+    <span class="indicador-dato">Historial: <strong>${estado.historial.length}</strong></span>
+  `;
+
+  refs.btnReiniciarTodo.disabled = totalEstudiantes === 0 && estado.historial.length === 0;
+  refs.panelConfirmacion.classList.toggle('oculto', !mostrandoConfirmacionReinicio);
+
+  refs.bannerMensaje.className = `banner-mensaje ${estado.tipoMensaje}`;
+  refs.iconoBanner.innerHTML = obtenerIconoBanner(estado.tipoMensaje);
+  refs.textoBanner.textContent = estado.ultimoMensaje;
+}
+
+/**
+ * Actualiza únicamente la lista de estudiantes registrados.
+ */
+function actualizarListaEstudiantes(estado: EstadoSorteo): void {
+  if (!refs) {
+    return;
+  }
+
+  const total = estado.estudiantes.length;
+  refs.metaTotalEstudiantes.textContent = `${total} ${total === 1 ? 'registrado' : 'registrados'}`;
+
+  if (total === 0) {
+    refs.contenedorListaEstudiantes.innerHTML = `
       <div class="estado-vacio">
-        <p>Aún no hay un sorteo activo en pantalla.</p>
-        <p>Registra a tus estudiantes, elige el número de equipos y presiona <strong> Sortear Equipos Ahora</strong>.</p>
+        <p>Aún no hay estudiantes en la lista.</p>
+        <p>Escribe un nombre arriba o toca <strong>Cargar grupo de prueba</strong>.</p>
       </div>
     `;
+    return;
+  }
+
+  refs.contenedorListaEstudiantes.innerHTML = `
+    <ul class="lista-estudiantes" aria-label="Lista de estudiantes registrados">
+      ${estado.estudiantes
+        .map((est, idx) => {
+          if (idEstudianteEditando === est.id) {
+            return `
+              <li class="item-estudiante">
+                <div class="fila-edicion">
+                  <input
+                    id="input-edicion-estudiante"
+                    type="text"
+                    class="campo-texto"
+                    value="${escaparHtml(est.nombre)}"
+                    maxlength="${CONFIG.MAX_LONGITUD_NOMBRE}"
+                    autocapitalize="words"
+                    enterkeyhint="done"
+                    aria-label="Editar nombre de ${escaparHtml(est.nombre)}"
+                  />
+                  <div class="botones-edicion">
+                    <button
+                      type="button"
+                      class="btn btn-verde"
+                      data-accion="guardar-edicion"
+                      data-id="${escaparHtml(est.id)}"
+                    >
+                      Guardar
+                    </button>
+                    <button
+                      type="button"
+                      class="btn btn-secundario"
+                      data-accion="cancelar-edicion"
+                    >
+                      Cancelar
+                    </button>
+                  </div>
+                </div>
+              </li>
+            `;
+          }
+
+          return `
+            <li class="item-estudiante">
+              <div class="info-estudiante">
+                <span class="numero-orden">${idx + 1}.</span>
+                <span class="nombre-estudiante">${escaparHtml(est.nombre)}</span>
+              </div>
+              <div class="acciones-estudiante">
+                <button
+                  type="button"
+                  class="btn-icono"
+                  data-accion="iniciar-edicion"
+                  data-id="${escaparHtml(est.id)}"
+                  title="Corregir nombre de ${escaparHtml(est.nombre)}"
+                  aria-label="Corregir nombre de ${escaparHtml(est.nombre)}"
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <path d="M12 20h9"/>
+                    <path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/>
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  class="btn-icono eliminar"
+                  data-accion="eliminar-estudiante"
+                  data-id="${escaparHtml(est.id)}"
+                  title="Eliminar a ${escaparHtml(est.nombre)}"
+                  aria-label="Eliminar a ${escaparHtml(est.nombre)}"
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <polyline points="3 6 5 6 21 6"/>
+                    <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
+                  </svg>
+                </button>
+              </div>
+            </li>
+          `;
+        })
+        .join('')}
+    </ul>
+  `;
+
+  if (idEstudianteEditando) {
+    const inputEdicion = document.querySelector<HTMLInputElement>('#input-edicion-estudiante');
+    if (inputEdicion) {
+      inputEdicion.focus();
+      inputEdicion.select();
+    }
+  }
+}
+
+/**
+ * Actualiza los botones y estado de configuración de equipos y semilla.
+ */
+function actualizarControlesSorteo(estado: EstadoSorteo): void {
+  if (!refs) {
+    return;
+  }
+
+  const totalEstudiantes = estado.estudiantes.length;
+  const puedeSortear =
+    !sorteoEnCurso &&
+    totalEstudiantes >= CONFIG.MIN_ESTUDIANTES &&
+    estado.cantidadEquipos >= CONFIG.MIN_EQUIPOS &&
+    estado.cantidadEquipos <= totalEstudiantes;
+
+  refs.btnDecrementarEquipos.disabled = estado.cantidadEquipos <= CONFIG.MIN_EQUIPOS;
+  refs.valorEquipos.textContent = String(estado.cantidadEquipos);
+  refs.btnIncrementarEquipos.disabled =
+    totalEstudiantes >= CONFIG.MIN_ESTUDIANTES && estado.cantidadEquipos >= totalEstudiantes;
+
+  refs.notaEquilibrio.textContent = describirEquilibrioPrevio(
+    totalEstudiantes,
+    estado.cantidadEquipos
+  );
+
+  if (document.activeElement !== refs.inputSemilla) {
+    refs.inputSemilla.value = String(estado.semilla);
+  }
+
+  refs.btnEjecutarSorteo.disabled = !puedeSortear;
+  refs.contenedorBtnNuevoSorteo.innerHTML = estado.sorteoActual
+    ? `
+      <button
+        type="button"
+        class="btn btn-violeta btn-bloque"
+        data-accion="preparar-nuevo-sorteo"
+      >
+        Preparar nuevo sorteo
+      </button>
+    `
+    : '';
+}
+
+/**
+ * Actualiza únicamente la zona de tarjetas de equipos conformados.
+ */
+function actualizarResultados(estado: EstadoSorteo): void {
+  if (!refs) {
+    return;
+  }
+
+  const sorteo: ResultadoSorteo | null = estado.sorteoActual;
+  refs.metaResultados.textContent = sorteo
+    ? `${sorteo.cantidadEquipos} equipos activos`
+    : 'Sin sorteo en pantalla';
+
+  if (!sorteo) {
+    refs.contenedorResultados.innerHTML = `
+      <div class="estado-vacio">
+        <p>Aún no hay un sorteo activo en pantalla.</p>
+        <p>Registra a tus estudiantes, elige la cantidad de equipos y toca <strong>Sortear Equipos Ahora</strong>.</p>
+      </div>
+    `;
+    return;
   }
 
   const avisoRepeticiones = sorteo.evitoTodasLasRepeticiones
@@ -154,8 +647,8 @@ function renderizarZonaResultados(estado: EstadoSorteo): string {
 
   const tarjetasEquipos = sorteo.equipos
     .map(
-      (equipo, idx) => `
-      <article class="tarjeta-equipo" style="animation-delay: ${Math.min(idx * 45, 250)}ms">
+      (equipo) => `
+      <article class="tarjeta-equipo">
         <header class="cabecera-equipo">
           <h3 class="nombre-equipo">${escaparHtml(equipo.nombre)}</h3>
           <span class="conteo-equipo">${equipo.integrantes.length} ${
@@ -179,10 +672,10 @@ function renderizarZonaResultados(estado: EstadoSorteo): string {
     )
     .join('');
 
-  return `
+  refs.contenedorResultados.innerHTML = `
     <div class="resumen-sorteo-actual">
       <div class="resumen-indicadores">
-        <span class="indicador-dato">Semilla utilizada: <strong>${sorteo.semillaUtilizada}</strong></span>
+        <span class="indicador-dato">Semilla: <strong>${sorteo.semillaUtilizada}</strong></span>
         <span class="separador-punto" aria-hidden="true">·</span>
         <span class="indicador-dato">Participantes: <strong>${sorteo.cantidadEstudiantes}</strong></span>
         <span class="separador-punto" aria-hidden="true">·</span>
@@ -199,37 +692,80 @@ function renderizarZonaResultados(estado: EstadoSorteo): string {
 }
 
 /**
- * Genera el bloque HTML para la lista del historial de sorteos realizados.
+ * Actualiza de forma eficiente la lista del historial limitando nodos en pantallas móviles si hay muchos registros.
  */
-function renderizarZonaHistorial(estado: EstadoSorteo): string {
-  if (estado.historial.length === 0) {
-    return `
+function actualizarHistorial(estado: EstadoSorteo): void {
+  if (!refs) {
+    return;
+  }
+
+  const totalHistorial = estado.historial.length;
+
+  refs.contenedorAccionHistorial.innerHTML =
+    totalHistorial > 0
+      ? `
+      <button
+        type="button"
+        class="btn btn-secundario"
+        data-accion="limpiar-historial"
+      >
+        Limpiar historial
+      </button>
+    `
+      : `<span class="meta-seccion">0 guardados</span>`;
+
+  if (totalHistorial === 0) {
+    refs.contenedorHistorial.innerHTML = `
       <div class="estado-vacio">
         <p>Todavía no se han registrado sorteos en el historial.</p>
       </div>
     `;
+    return;
   }
 
-  return `
+  const elementosVisibles = mostrarHistorialCompleto
+    ? estado.historial
+    : estado.historial.slice(0, LIMITE_HISTORIAL_COMPACTO);
+
+  const botonExpandir =
+    totalHistorial > LIMITE_HISTORIAL_COMPACTO
+      ? `
+      <div style="margin-top: 0.75rem;">
+        <button
+          type="button"
+          class="btn btn-secundario btn-bloque"
+          data-accion="alternar-historial-completo"
+        >
+          ${
+            mostrarHistorialCompleto
+              ? 'Mostrar solo los más recientes'
+              : `Ver los ${totalHistorial} sorteos del historial`
+          }
+        </button>
+      </div>
+    `
+      : '';
+
+  refs.contenedorHistorial.innerHTML = `
     <ul class="lista-historial">
-      ${estado.historial
+      ${elementosVisibles
         .map((item, indice) => {
-          const numeroSorteo = estado.historial.length - indice;
+          const numeroSorteo = totalHistorial - indice;
           const esActivo = estado.sorteoActual?.id === item.id;
           return `
             <li class="item-historial ${esActivo ? 'activo' : ''}">
               <div class="info-historial">
                 <span class="titulo-item-historial">Sorteo #${numeroSorteo}</span>
                 <span class="separador-punto" aria-hidden="true">·</span>
-                <span>${item.cantidadEquipos} equipos (${item.cantidadEstudiantes} estudiantes)</span>
+                <span>${item.cantidadEquipos} equipos (${item.cantidadEstudiantes} est.)</span>
                 <span class="separador-punto" aria-hidden="true">·</span>
                 <span>Semilla ${item.semillaUtilizada}</span>
                 <span class="separador-punto" aria-hidden="true">·</span>
                 <span>${
                   item.parejasRepetidas === 0
-                    ? 'Sin parejas repetidas'
+                    ? '0 repetidas'
                     : `${item.parejasRepetidas} ${
-                        item.parejasRepetidas === 1 ? 'pareja repetida' : 'parejas repetidas'
+                        item.parejasRepetidas === 1 ? 'repetida' : 'repetidas'
                       }`
                 }</span>
               </div>
@@ -247,390 +783,38 @@ function renderizarZonaHistorial(estado: EstadoSorteo): string {
         })
         .join('')}
     </ul>
+    ${botonExpandir}
   `;
 }
 
 /**
- * Renderiza toda la interfaz dentro de #app manteniendo el foco de manera predecible.
+ * Sincroniza todas las secciones dinámicas del DOM a partir del estado actual.
  */
-function renderizarAplicacion(focoEnCampo?: 'nuevo-estudiante' | 'edicion'): void {
-  const contenedor = document.querySelector<HTMLDivElement>('#app');
-  if (!contenedor) {
+function sincronizarVistaCompleta(): void {
+  const estado = obtenerEstado();
+  actualizarIndicadoresYBanner(estado);
+  actualizarListaEstudiantes(estado);
+  actualizarControlesSorteo(estado);
+  actualizarResultados(estado);
+  actualizarHistorial(estado);
+}
+
+/**
+ * En pantallas móviles de una sola columna (< 960px), desplaza suavemente la vista hacia los equipos generados.
+ */
+function desplazarHaciaResultadosEnMovil(): void {
+  if (!refs || window.innerWidth >= 960) {
     return;
   }
-
-  const estado = obtenerEstado();
-  const totalEstudiantes = estado.estudiantes.length;
-  const puedeSortear =
-    totalEstudiantes >= CONFIG.MIN_ESTUDIANTES &&
-    estado.cantidadEquipos >= CONFIG.MIN_EQUIPOS &&
-    estado.cantidadEquipos <= totalEstudiantes;
-
-  const iconoBanner =
-    estado.tipoMensaje === 'exito'
-      ? `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>`
-      : estado.tipoMensaje === 'error'
-      ? `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>`
-      : estado.tipoMensaje === 'advertencia'
-      ? `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg>`
-      : `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>`;
-
-  contenedor.innerHTML = `
-    <div class="contenedor-app">
-      <!-- Encabezado principal -->
-      <header class="encabezado">
-        <div>
-          <div class="encabezado-identidad">
-            <div class="marca-icono" aria-hidden="true">
-              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-                <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/>
-                <circle cx="9" cy="7" r="4"/>
-                <path d="M23 21v-2a4 4 0 00-3-3.87"/>
-                <path d="M16 3.13a4 4 0 010 7.75"/>
-              </svg>
-            </div>
-            <div>
-              <h1 class="titulo-app">SORTEO JUSTO</h1>
-              <p class="subtitulo-app">Organizador inteligente de equipos equilibrados sin repetir compañeros</p>
-            </div>
-          </div>
-
-          <div class="barra-metricas">
-            <div class="resumen-indicadores" aria-label="Indicadores del grupo">
-              <span class="indicador-dato">Estudiantes: <strong>${totalEstudiantes}</strong></span>
-              <span class="separador-punto" aria-hidden="true">·</span>
-              <span class="indicador-dato">Equipos: <strong>${estado.cantidadEquipos}</strong></span>
-              <span class="separador-punto" aria-hidden="true">·</span>
-              <span class="indicador-dato">Sorteos en historial: <strong>${estado.historial.length}</strong></span>
-            </div>
-
-            <div class="acciones-encabezado">
-              <button type="button" class="btn btn-secundario" data-accion="cargar-ejemplo">
-                Cargar grupo de prueba
-              </button>
-              <button
-                type="button"
-                class="btn btn-peligro"
-                data-accion="solicitar-reinicio"
-                ${totalEstudiantes === 0 && estado.historial.length === 0 ? 'disabled' : ''}
-              >
-                Reiniciar todo
-              </button>
-            </div>
-          </div>
-        </div>
-      </header>
-
-      <!-- Confirmación segura de reinicio (cuando el usuario presiona Reiniciar todo) -->
-      ${
-        mostrandoConfirmacionReinicio
-          ? `
-        <section class="panel-confirmacion" role="alertdialog" aria-labelledby="titulo-confirmar-reinicio">
-          <p id="titulo-confirmar-reinicio" class="panel-confirmacion-texto">
-            <strong>¿Deseas reiniciar todos los datos?</strong> Se borrarán la lista de estudiantes y el historial guardado en este dispositivo.
-          </p>
-          <div class="panel-confirmacion-botones">
-            <button type="button" class="btn btn-peligro" data-accion="confirmar-reinicio">
-              Sí, borrar todo y reiniciar
-            </button>
-            <button type="button" class="btn btn-secundario" data-accion="cancelar-reinicio">
-              Cancelar
-            </button>
-          </div>
-        </section>
-      `
-          : ''
-      }
-
-      <!-- Banner de retroalimentación clara -->
-      <div class="banner-mensaje ${estado.tipoMensaje}" role="status" aria-live="polite">
-        <span class="banner-icono">${iconoBanner}</span>
-        <span>${escaparHtml(estado.ultimoMensaje)}</span>
-      </div>
-
-      <!-- Rejilla principal de dos columnas en escritorio y una en móvil -->
-      <main class="rejilla-principal">
-        <!-- Columna izquierda: Registro de estudiantes y configuración -->
-        <section class="tarjeta-seccion" aria-labelledby="titulo-panel-estudiantes">
-          <div class="encabezado-seccion">
-            <h2 id="titulo-panel-estudiantes" class="titulo-seccion">
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                <path d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2"/>
-                <circle cx="9" cy="7" r="4"/>
-                <line x1="19" y1="8" x2="19" y2="14"/>
-                <line x1="22" y1="11" x2="16" y2="11"/>
-              </svg>
-              <span>1. Estudiantes</span>
-            </h2>
-            <span class="meta-seccion">${totalEstudiantes} registrados</span>
-          </div>
-
-          <form id="form-registro-estudiante" class="formulario-registro" novalidate>
-            <label for="input-nombre-estudiante" class="etiqueta-campo">Nombre completo del estudiante</label>
-            <div class="fila-entrada">
-              <input
-                id="input-nombre-estudiante"
-                name="nombre"
-                type="text"
-                class="campo-texto"
-                placeholder="Ej. Lucía Fernández"
-                maxlength="${CONFIG.MAX_LONGITUD_NOMBRE}"
-                autocomplete="off"
-              />
-              <button type="submit" class="btn btn-turquesa">
-                Agregar
-              </button>
-            </div>
-          </form>
-
-          ${
-            totalEstudiantes === 0
-              ? `
-            <div class="estado-vacio">
-              <p>Aún no hay estudiantes en la lista.</p>
-              <p>Escribe un nombre arriba o usa el botón <strong>Cargar grupo de prueba</strong>.</p>
-            </div>
-          `
-              : `
-            <ul class="lista-estudiantes" aria-label="Lista de estudiantes registrados">
-              ${estado.estudiantes
-                .map((est, idx) => {
-                  if (idEstudianteEditando === est.id) {
-                    return `
-                      <li class="item-estudiante">
-                        <div class="fila-edicion">
-                          <input
-                            id="input-edicion-estudiante"
-                            type="text"
-                            class="campo-texto"
-                            value="${escaparHtml(est.nombre)}"
-                            maxlength="${CONFIG.MAX_LONGITUD_NOMBRE}"
-                            aria-label="Editar nombre de ${escaparHtml(est.nombre)}"
-                          />
-                          <button
-                            type="button"
-                            class="btn btn-verde"
-                            data-accion="guardar-edicion"
-                            data-id="${escaparHtml(est.id)}"
-                          >
-                            Guardar
-                          </button>
-                          <button
-                            type="button"
-                            class="btn btn-secundario"
-                            data-accion="cancelar-edicion"
-                          >
-                            Cancelar
-                          </button>
-                        </div>
-                      </li>
-                    `;
-                  }
-
-                  return `
-                    <li class="item-estudiante">
-                      <div class="info-estudiante">
-                        <span class="numero-orden">${idx + 1}.</span>
-                        <span class="nombre-estudiante">${escaparHtml(est.nombre)}</span>
-                      </div>
-                      <div class="acciones-estudiante">
-                        <button
-                          type="button"
-                          class="btn-icono"
-                          data-accion="iniciar-edicion"
-                          data-id="${escaparHtml(est.id)}"
-                          title="Corregir nombre de ${escaparHtml(est.nombre)}"
-                          aria-label="Corregir nombre de ${escaparHtml(est.nombre)}"
-                        >
-                          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                            <path d="M12 20h9"/>
-                            <path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/>
-                          </svg>
-                        </button>
-                        <button
-                          type="button"
-                          class="btn-icono eliminar"
-                          data-accion="eliminar-estudiante"
-                          data-id="${escaparHtml(est.id)}"
-                          title="Eliminar a ${escaparHtml(est.nombre)}"
-                          aria-label="Eliminar a ${escaparHtml(est.nombre)}"
-                        >
-                          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                            <polyline points="3 6 5 6 21 6"/>
-                            <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
-                          </svg>
-                        </button>
-                      </div>
-                    </li>
-                  `;
-                })
-                .join('')}
-            </ul>
-          `
-          }
-
-          <!-- Bloque de configuración de equipos y semilla -->
-          <div class="bloque-configuracion">
-            <div>
-              <label class="etiqueta-campo">2. Cantidad de equipos a formar</label>
-              <div class="control-equipos" style="margin-top: 0.5rem;">
-                <button
-                  type="button"
-                  class="btn btn-secundario"
-                  data-accion="decrementar-equipos"
-                  aria-label="Disminuir cantidad de equipos"
-                  ${estado.cantidadEquipos <= CONFIG.MIN_EQUIPOS ? 'disabled' : ''}
-                >
-                  −
-                </button>
-                <span class="valor-equipos" aria-live="polite">${estado.cantidadEquipos}</span>
-                <button
-                  type="button"
-                  class="btn btn-secundario"
-                  data-accion="incrementar-equipos"
-                  aria-label="Aumentar cantidad de equipos"
-                  ${
-                    totalEstudiantes >= CONFIG.MIN_ESTUDIANTES &&
-                    estado.cantidadEquipos >= totalEstudiantes
-                      ? 'disabled'
-                      : ''
-                  }
-                >
-                  +
-                </button>
-              </div>
-              <p class="nota-equilibrio" style="margin-top: 0.5rem;">
-                ${describirEquilibrioPrevio(totalEstudiantes, estado.cantidadEquipos)}
-              </p>
-            </div>
-
-            <div class="fila-semilla">
-              <label for="input-semilla" class="etiqueta-campo">
-                Semilla pseudoaleatoria (reproducibilidad)
-              </label>
-              <div class="controles-semilla">
-                <input
-                  id="input-semilla"
-                  type="number"
-                  min="1"
-                  step="1"
-                  class="campo-numero"
-                  value="${estado.semilla}"
-                />
-                <button
-                  type="button"
-                  class="btn btn-secundario"
-                  data-accion="aplicar-semilla"
-                >
-                  Fijar
-                </button>
-              </div>
-            </div>
-
-            <div class="acciones-sorteo">
-              <button
-                type="button"
-                class="btn btn-verde btn-bloque"
-                data-accion="ejecutar-sorteo"
-                ${!puedeSortear ? 'disabled' : ''}
-              >
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
-                  <polyline points="16 3 21 3 21 8"/>
-                  <line x1="4" y1="20" x2="21" y2="3"/>
-                  <polyline points="21 16 21 21 16 21"/>
-                  <line x1="15" y1="15" x2="21" y2="21"/>
-                  <line x1="4" y1="4" x2="9" y2="9"/>
-                </svg>
-                <span>Sortear Equipos Ahora</span>
-              </button>
-
-              ${
-                estado.sorteoActual
-                  ? `
-                <button
-                  type="button"
-                  class="btn btn-violeta btn-bloque"
-                  data-accion="preparar-nuevo-sorteo"
-                >
-                  Preparar nuevo sorteo
-                </button>
-              `
-                  : ''
-              }
-            </div>
-          </div>
-        </section>
-
-        <!-- Columna derecha: Resultados en tarjetas e Historial -->
-        <div>
-          <section class="tarjeta-seccion" aria-labelledby="titulo-panel-resultados">
-            <div class="encabezado-seccion">
-              <h2 id="titulo-panel-resultados" class="titulo-seccion">
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                  <rect x="3" y="3" width="7" height="7" rx="1"/>
-                  <rect x="14" y="3" width="7" height="7" rx="1"/>
-                  <rect x="14" y="14" width="7" height="7" rx="1"/>
-                  <rect x="3" y="14" width="7" height="7" rx="1"/>
-                </svg>
-                <span>3. Equipos Conformados</span>
-              </h2>
-              <span class="meta-seccion">
-                ${
-                  estado.sorteoActual
-                    ? `${estado.sorteoActual.cantidadEquipos} equipos activos`
-                    : 'Sin sorteo en pantalla'
-                }
-              </span>
-            </div>
-
-            ${renderizarZonaResultados(estado)}
-          </section>
-
-          <section class="tarjeta-seccion seccion-historial" aria-labelledby="titulo-panel-historial">
-            <div class="encabezado-seccion">
-              <h2 id="titulo-panel-historial" class="titulo-seccion">
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                  <circle cx="12" cy="12" r="10"/>
-                  <polyline points="12 6 12 12 16 14"/>
-                </svg>
-                <span>4. Historial de Sorteos</span>
-              </h2>
-              ${
-                estado.historial.length > 0
-                  ? `
-                <button
-                  type="button"
-                  class="btn btn-secundario"
-                  data-accion="limpiar-historial"
-                >
-                  Limpiar historial
-                </button>
-              `
-                  : `<span class="meta-seccion">0 guardados</span>`
-              }
-            </div>
-
-            ${renderizarZonaHistorial(estado)}
-          </section>
-        </div>
-      </main>
-    </div>
-  `;
-
-  if (focoEnCampo === 'nuevo-estudiante') {
-    const inputNuevo = document.querySelector<HTMLInputElement>('#input-nombre-estudiante');
-    inputNuevo?.focus();
-  } else if (focoEnCampo === 'edicion') {
-    const inputEdicion = document.querySelector<HTMLInputElement>('#input-edicion-estudiante');
-    if (inputEdicion) {
-      inputEdicion.focus();
-      inputEdicion.select();
-    }
-  }
+  const prefiereReducirMovimiento = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  refs.seccionResultados.scrollIntoView({
+    behavior: prefiereReducirMovimiento ? 'auto' : 'smooth',
+    block: 'start',
+  });
 }
 
 /**
- * Configura la delegación de eventos sobre el contenedor #app una sola vez para máximo rendimiento.
+ * Configura la delegación de eventos una única vez sobre el contenedor raíz.
  */
 function inicializarEventos(): void {
   const contenedor = document.querySelector<HTMLDivElement>('#app');
@@ -638,28 +822,33 @@ function inicializarEventos(): void {
     return;
   }
 
-  // Envío del formulario para agregar estudiante
+  // Registro de estudiante manteniendo el teclado virtual activo en móviles
   contenedor.addEventListener('submit', (evento) => {
     const formulario = (evento.target as HTMLElement).closest('#form-registro-estudiante');
-    if (!formulario) {
+    if (!formulario || !refs) {
       return;
     }
     evento.preventDefault();
 
-    const inputNombre = document.querySelector<HTMLInputElement>('#input-nombre-estudiante');
-    const valor = inputNombre ? inputNombre.value : '';
-
+    const valor = refs.inputNombreEstudiante.value;
     const exito = registrarEstudiante(valor);
+
     if (exito) {
+      refs.inputNombreEstudiante.value = '';
       guardarEnAlmacenamientoLocal();
     }
-    renderizarAplicacion('nuevo-estudiante');
+
+    const estado = obtenerEstado();
+    actualizarIndicadoresYBanner(estado);
+    actualizarListaEstudiantes(estado);
+    actualizarControlesSorteo(estado);
+    refs.inputNombreEstudiante.focus();
   });
 
-  // Delegación de clics para todos los botones con atributo data-accion
+  // Delegación de todos los botones interactivos
   contenedor.addEventListener('click', (evento) => {
     const boton = (evento.target as HTMLElement).closest<HTMLButtonElement>('[data-accion]');
-    if (!boton || boton.disabled) {
+    if (!boton || boton.disabled || !refs) {
       return;
     }
 
@@ -669,13 +858,13 @@ function inicializarEventos(): void {
     switch (accion) {
       case 'iniciar-edicion': {
         idEstudianteEditando = id;
-        renderizarAplicacion('edicion');
+        actualizarListaEstudiantes(obtenerEstado());
         break;
       }
 
       case 'cancelar-edicion': {
         idEstudianteEditando = null;
-        renderizarAplicacion();
+        actualizarListaEstudiantes(obtenerEstado());
         break;
       }
 
@@ -685,10 +874,10 @@ function inicializarEventos(): void {
         if (modificarEstudiante(id, nuevoNombre)) {
           idEstudianteEditando = null;
           guardarEnAlmacenamientoLocal();
-          renderizarAplicacion();
-        } else {
-          renderizarAplicacion('edicion');
         }
+        const estado = obtenerEstado();
+        actualizarIndicadoresYBanner(estado);
+        actualizarListaEstudiantes(estado);
         break;
       }
 
@@ -699,7 +888,10 @@ function inicializarEventos(): void {
         if (eliminarEstudiante(id)) {
           guardarEnAlmacenamientoLocal();
         }
-        renderizarAplicacion();
+        const estado = obtenerEstado();
+        actualizarIndicadoresYBanner(estado);
+        actualizarListaEstudiantes(estado);
+        actualizarControlesSorteo(estado);
         break;
       }
 
@@ -708,7 +900,9 @@ function inicializarEventos(): void {
         if (configurarCantidadEquipos(actual - 1)) {
           guardarEnAlmacenamientoLocal();
         }
-        renderizarAplicacion();
+        const estado = obtenerEstado();
+        actualizarIndicadoresYBanner(estado);
+        actualizarControlesSorteo(estado);
         break;
       }
 
@@ -717,47 +911,93 @@ function inicializarEventos(): void {
         if (configurarCantidadEquipos(actual + 1)) {
           guardarEnAlmacenamientoLocal();
         }
-        renderizarAplicacion();
+        const estado = obtenerEstado();
+        actualizarIndicadoresYBanner(estado);
+        actualizarControlesSorteo(estado);
         break;
       }
 
       case 'aplicar-semilla': {
-        const inputSemilla = document.querySelector<HTMLInputElement>('#input-semilla');
-        const valorSemilla = inputSemilla ? Number(inputSemilla.value) : NaN;
+        const valorSemilla = Number(refs.inputSemilla.value);
         if (configurarSemilla(valorSemilla)) {
           guardarEnAlmacenamientoLocal();
         }
-        renderizarAplicacion();
+        const estado = obtenerEstado();
+        actualizarIndicadoresYBanner(estado);
+        actualizarControlesSorteo(estado);
         break;
       }
 
       case 'ejecutar-sorteo': {
-        const inputSemilla = document.querySelector<HTMLInputElement>('#input-semilla');
-        const valorSemilla = inputSemilla ? Number(inputSemilla.value) : undefined;
-        if (realizarSorteo(valorSemilla)) {
-          guardarEnAlmacenamientoLocal();
+        if (sorteoEnCurso) {
+          return;
         }
-        renderizarAplicacion();
+        sorteoEnCurso = true;
+        refs.btnEjecutarSorteo.disabled = true;
+
+        const valorSemilla = Number(refs.inputSemilla.value);
+        const semillaOpcional = Number.isFinite(valorSemilla) ? valorSemilla : undefined;
+
+        // Permite al navegador móvil pintar el estado activo del botón antes de calcular el sorteo
+        window.requestAnimationFrame(() => {
+          const exito = realizarSorteo(semillaOpcional);
+          sorteoEnCurso = false;
+
+          if (exito) {
+            guardarEnAlmacenamientoLocal();
+          }
+
+          const estado = obtenerEstado();
+          actualizarIndicadoresYBanner(estado);
+          actualizarControlesSorteo(estado);
+          actualizarResultados(estado);
+          actualizarHistorial(estado);
+
+          if (exito) {
+            desplazarHaciaResultadosEnMovil();
+          }
+        });
         break;
       }
 
       case 'preparar-nuevo-sorteo': {
         prepararNuevoSorteo();
-        renderizarAplicacion();
+        const estado = obtenerEstado();
+        actualizarIndicadoresYBanner(estado);
+        actualizarControlesSorteo(estado);
+        actualizarResultados(estado);
+        actualizarHistorial(estado);
         break;
       }
 
       case 'ver-historial': {
-        seleccionarSorteoDeHistorial(id);
-        renderizarAplicacion();
+        if (seleccionarSorteoDeHistorial(id)) {
+          const estado = obtenerEstado();
+          actualizarIndicadoresYBanner(estado);
+          actualizarControlesSorteo(estado);
+          actualizarResultados(estado);
+          actualizarHistorial(estado);
+          desplazarHaciaResultadosEnMovil();
+        }
+        break;
+      }
+
+      case 'alternar-historial-completo': {
+        mostrarHistorialCompleto = !mostrarHistorialCompleto;
+        actualizarHistorial(obtenerEstado());
         break;
       }
 
       case 'limpiar-historial': {
         if (limpiarHistorial()) {
+          mostrarHistorialCompleto = false;
           guardarEnAlmacenamientoLocal();
         }
-        renderizarAplicacion();
+        const estado = obtenerEstado();
+        actualizarIndicadoresYBanner(estado);
+        actualizarControlesSorteo(estado);
+        actualizarResultados(estado);
+        actualizarHistorial(estado);
         break;
       }
 
@@ -767,38 +1007,39 @@ function inicializarEventos(): void {
         }
         configurarCantidadEquipos(2);
         guardarEnAlmacenamientoLocal();
-        renderizarAplicacion();
+        sincronizarVistaCompleta();
         break;
       }
 
       case 'solicitar-reinicio': {
         mostrandoConfirmacionReinicio = true;
-        renderizarAplicacion();
+        actualizarIndicadoresYBanner(obtenerEstado());
         break;
       }
 
       case 'cancelar-reinicio': {
         mostrandoConfirmacionReinicio = false;
-        renderizarAplicacion();
+        actualizarIndicadoresYBanner(obtenerEstado());
         break;
       }
 
       case 'confirmar-reinicio': {
         mostrandoConfirmacionReinicio = false;
         idEstudianteEditando = null;
+        mostrarHistorialCompleto = false;
         reiniciarAplicacion();
         try {
           window.localStorage.removeItem(CLAVE_STORAGE);
         } catch {
-          // Ignorar errores de acceso a almacenamiento restringido
+          // Ignorar restricciones de almacenamiento
         }
-        renderizarAplicacion('nuevo-estudiante');
+        sincronizarVistaCompleta();
         break;
       }
     }
   });
 
-  // Soporte de teclado para guardar edición con Enter o cancelar con Escape
+  // Teclado para guardar o cancelar edición en línea
   contenedor.addEventListener('keydown', (evento) => {
     const objetivo = evento.target as HTMLElement;
     if (objetivo.id !== 'input-edicion-estudiante' || !idEstudianteEditando) {
@@ -811,19 +1052,20 @@ function inicializarEventos(): void {
       if (modificarEstudiante(idEstudianteEditando, inputEdicion.value)) {
         idEstudianteEditando = null;
         guardarEnAlmacenamientoLocal();
-        renderizarAplicacion();
-      } else {
-        renderizarAplicacion('edicion');
       }
+      const estado = obtenerEstado();
+      actualizarIndicadoresYBanner(estado);
+      actualizarListaEstudiantes(estado);
     } else if (evento.key === 'Escape') {
       evento.preventDefault();
       idEstudianteEditando = null;
-      renderizarAplicacion();
+      actualizarListaEstudiantes(obtenerEstado());
     }
   });
 }
 
-// Inicialización al cargar el documento
+// Arranque de la aplicación
 restaurarDeAlmacenamientoLocal();
+montarEstructuraBase();
 inicializarEventos();
-renderizarAplicacion();
+sincronizarVistaCompleta();

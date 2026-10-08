@@ -31,3 +31,9 @@ Este documento registra en orden cronológico las instrucciones enviadas a la In
 ## Prompt 5: Fase 4 — Diseño e interfaz de usuario (`index.html`, `src/main.ts`, `src/estilo.css`)
 - **Objetivo:** Desarrollar la interfaz visual completa de **SORTEO JUSTO** con estética azul marino oscuro y acentos turquesa, verde esmeralda y violeta, tarjetas de equipos, edición en línea, confirmación integrada de reinicio, persistencia en `localStorage` y optimización de rendimiento para celulares Android económicos (`>= 320px`, controles táctiles `>= 44x44px`).
 - **Resultado obtenido:** Interfaz funcional conectada a `src/logica.ts`, compilada y verificada con `npm run lint`, `npm test` y `npm run build`.
+
+---
+
+## Prompt 6: Fase 5 — Optimización y adaptación para dispositivos móviles (`src/main.ts`, `src/estilo.css`)
+- **Objetivo:** Optimizar el rendimiento y la experiencia táctil para celulares Android económicos en resoluciones de `320px`, `360px`, `375px`, `390px` y `414px`, implementando actualizaciones parciales del DOM (evitando cierres del teclado móvil), ejecución no bloqueante con `requestAnimationFrame`, paginación ligera de historial y aislamiento de repintado CSS (`contain: content`).
+- **Resultado obtenido:** Interfaz móvil fluida sin desplazamiento horizontal, controles táctiles de `48px` de alto, 6 pruebas automatizadas en verde y compilación limpia.
