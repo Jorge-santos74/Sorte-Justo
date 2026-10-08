@@ -1,0 +1,31 @@
+/* Estilos base de SORTEO JUSTO (Fase 1: Configuración inicial) */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: #0b132b;
+  color: #f8fafc;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+.contenedor-inicial {
+  max-width: 720px;
+  margin: 3rem auto;
+  padding: 2rem;
+  background-color: #1c2541;
+  border-radius: 16px;
+  border: 1px solid #2dd4bf;
+  text-align: center;
+}
+
+.contenedor-inicial h1 {
+  color: #2dd4bf;
+  margin-bottom: 0.75rem;
+}

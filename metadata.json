@@ -1,0 +1,6 @@
+{
+  "name": "Sorteo Justo",
+  "description": "Aplicación web educativa para organizar estudiantes en equipos equilibrados de manera aleatoria evitando repeticiones de sorteos anteriores.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
